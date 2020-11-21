@@ -1,0 +1,2 @@
+MODELDIR=`dirname $4` 
+L1=$1;L2=$2;DATA=$3;MODEL=$4; cat data/para/dev/$DATA.$L1.tok | tools/fastBPE/fast applybpe_stream data/processed/cs-de-hsb_wmt20/codes data/processed/cs-de-hsb_wmt20/vocab.cs-de-hsb | ./translate.sh $MODEL $MODELDIR/$DATA.hyp.$L2 $L1 $L2; ~/mosesdecoder//scripts/generic/multi-bleu.perl data/para/dev/$DATA.$L2.tok < $MODELDIR/$DATA.hyp.$L2 $L1 $L2 |& tee $MODELDIR/$DATA.bleu.$L2

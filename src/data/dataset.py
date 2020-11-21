@@ -88,6 +88,7 @@ class Dataset(object):
         self.sent = sent
         self.pos = pos
         self.lengths = self.pos[:, 1] - self.pos[:, 0]
+        self.max_len = params.max_len
 
         # check number of sentences
         assert len(self.pos) == (self.sent == self.eos_index).sum()
@@ -182,7 +183,6 @@ class Dataset(object):
         Return a sentences iterator, given the associated sentence batches.
         """
         assert type(return_indices) is bool
-
         for sentence_ids in batches:
             if 0 < self.max_batch_size < len(sentence_ids):
                 np.random.shuffle(sentence_ids)
@@ -230,6 +230,8 @@ class Dataset(object):
         if shuffle:
             rng.shuffle(batches)
 
+        batches = self.amend_first_batches(batches, lengths)
+
         # sanity checks
         assert n_sentences == sum([len(x) for x in batches])
         assert lengths[indices].sum() == sum([lengths[x].sum() for x in batches])
@@ -237,6 +239,19 @@ class Dataset(object):
 
         # return the iterator
         return self.get_batches_iterator(batches, return_indices)
+
+    def amend_first_batches(self, batches, lengths):
+        # ivana: detect out of memory in the beginning
+        batch_sizes = np.array([len(batch) for batch in batches])
+        batch_token_sizes = np.array([len(batch) * lengths[batch[-1]] for batch in batches])
+        smallest_batch = np.argmin(batch_sizes)
+        largest_batch = np.argmax(batch_sizes)
+        largest_token_batch = np.argmax(batch_token_sizes)
+        batches[0], batches[smallest_batch] = batches[smallest_batch], batches[0] 
+        batches[1], batches[largest_batch] = batches[largest_batch], batches[1] 
+        batches[2], batches[largest_token_batch] = batches[largest_token_batch], batches[2] 
+        return batches
+
 
 
 class ParallelDataset(Dataset):
@@ -248,6 +263,7 @@ class ParallelDataset(Dataset):
         self.batch_size = params.batch_size
         self.tokens_per_batch = params.tokens_per_batch
         self.max_batch_size = params.max_batch_size
+        self.max_len = params.max_len
 
         self.sent1 = sent1
         self.sent2 = sent2
@@ -394,6 +410,8 @@ class ParallelDataset(Dataset):
         # optionally shuffle batches
         if shuffle:
             np.random.shuffle(batches)
+        
+        batches = self.amend_first_batches(batches, lengths)
 
         # sanity checks
         assert n_sentences == sum([len(x) for x in batches])

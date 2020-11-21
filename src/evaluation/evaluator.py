@@ -16,7 +16,8 @@ from ..utils import to_cuda, restore_segmentation, concat_batches
 from ..model.memory import HashingMemory
 
 
-BLEU_SCRIPT_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'multi-bleu.perl')
+#BLEU_SCRIPT_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), 'multi-bleu.perl')
+BLEU_SCRIPT_PATH = os.path.join('./src/evaluation/multi-bleu.perl')
 assert os.path.isfile(BLEU_SCRIPT_PATH)
 
 
@@ -152,7 +153,9 @@ class Evaluator(object):
 
         for (lang1, lang2), v in self.data['para'].items():
 
-            assert lang1 < lang2
+            # xxx ivana: we can have asymmetric training data (synthetic), but we only create the ref data  once
+            if lang1 > lang2:
+                continue
 
             for data_set in ['valid', 'test']:
 
@@ -216,7 +219,7 @@ class Evaluator(object):
 
         return x, _x_real, pred_mask
 
-    def run_all_evals(self, trainer):
+    def run_all_evals(self, trainer, valid_only=False):
         """
         Run all evaluations.
         """
@@ -225,7 +228,13 @@ class Evaluator(object):
 
         with torch.no_grad():
 
-            for data_set in ['valid', 'test']:
+            if valid_only:
+                data_sets = ['valid']
+            else:
+                data_sets = ['valid', 'test']
+
+            for data_set in ['valid']: # xxx . 'test'
+                torch.cuda.empty_cache() # xxx ivana added 
 
                 # causal prediction task (evaluate perplexity and accuracy)
                 for lang1, lang2 in params.clm_steps:
@@ -388,6 +397,9 @@ class Evaluator(object):
         acc_name = '%s_%s_mlm_acc' % (data_set, l1l2)
         scores[ppl_name] = np.exp(xe_loss / n_words) if n_words > 0 else 1e9
         scores[acc_name] = 100. * n_valid / n_words if n_words > 0 else 0.
+        if self.params.is_master:
+            self.trainer.writer.add_scalar(ppl_name, scores[ppl_name], self.trainer.n_total_iter)
+            self.trainer.writer.add_scalar(acc_name, scores[acc_name], self.trainer.n_total_iter)
 
         # compute memory usage
         if eval_memory:
@@ -472,6 +484,7 @@ class EncDecEvaluator(Evaluator):
             dec2 = decoder('fwd', x=x2, lengths=len2, langs=langs2, causal=True, src_enc=enc1, src_len=len1)
 
             # loss
+            torch.cuda.empty_cache() # xxx ivana added 
             word_scores, loss = decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=True)
 
             # update stats
@@ -499,6 +512,10 @@ class EncDecEvaluator(Evaluator):
         # compute perplexity and prediction accuracy
         scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)] = np.exp(xe_loss / n_words)
         scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)] = 100. * n_valid / n_words
+        if self.params.is_master:
+            self.trainer.writer.add_scalar(('PPL-%s/%s2%s' % (data_set, lang1, lang2)), scores['%s_%s-%s_mt_ppl' % (data_set, lang1, lang2)], self.trainer.n_total_iter)
+            self.trainer.writer.add_scalar(('Accuracy-%s/%s2%s' % (data_set, lang1, lang2)), scores['%s_%s-%s_mt_acc' % (data_set, lang1, lang2)], self.trainer.n_total_iter)
+
 
         # compute memory usage
         if eval_memory:
@@ -509,7 +526,8 @@ class EncDecEvaluator(Evaluator):
         if eval_bleu:
 
             # hypothesis / reference paths
-            hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
+            #hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(scores['epoch'], lang1, lang2, data_set)
+            hyp_name = 'hyp{0}.{1}-{2}.{3}.txt'.format(self.trainer.n_total_iter, lang1, lang2, data_set)
             hyp_path = os.path.join(params.hyp_path, hyp_name)
             ref_path = params.ref_paths[(lang1, lang2, data_set)]
 
@@ -522,6 +540,8 @@ class EncDecEvaluator(Evaluator):
             bleu = eval_moses_bleu(ref_path, hyp_path)
             logger.info("BLEU %s %s : %f" % (hyp_path, ref_path, bleu))
             scores['%s_%s-%s_mt_bleu' % (data_set, lang1, lang2)] = bleu
+            if self.params.is_master:
+                self.trainer.writer.add_scalar(('BLEU-%s/%s2%s' % (data_set, lang1, lang2)), bleu, self.trainer.n_total_iter)
 
 
 def convert_to_text(batch, lengths, dico, params):
@@ -555,7 +575,7 @@ def eval_moses_bleu(ref, hyp):
     assert os.path.isfile(hyp)
     assert os.path.isfile(ref) or os.path.isfile(ref + '0')
     assert os.path.isfile(BLEU_SCRIPT_PATH)
-    command = BLEU_SCRIPT_PATH + ' %s < %s'
+    command = BLEU_SCRIPT_PATH + ' -lc %s < %s'
     p = subprocess.Popen(command % (ref, hyp), stdout=subprocess.PIPE, shell=True)
     result = p.communicate()[0].decode("utf-8")
     if result.startswith('BLEU'):

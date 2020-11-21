@@ -8,6 +8,7 @@
 import json
 import random
 import argparse
+import torch 
 
 from src.slurm import init_signal_handler, init_distributed_mode
 from src.data.loader import check_data_params, load_data
@@ -16,7 +17,7 @@ from src.model import check_model_params, build_model
 from src.model.memory import HashingMemory
 from src.trainer import SingleTrainer, EncDecTrainer
 from src.evaluation.evaluator import SingleEvaluator, EncDecEvaluator
-
+import warnings
 
 def get_parser():
     """
@@ -216,6 +217,7 @@ def get_parser():
 
 
 def main(params):
+    warnings.filterwarnings("ignore", category=UserWarning)
 
     # initialize the multi-GPU / multi-node training
     init_distributed_mode(params)
@@ -262,7 +264,7 @@ def main(params):
         trainer.n_sentences = 0
 
         while trainer.n_sentences < trainer.epoch_size:
-
+            
             # CLM steps
             for lang1, lang2 in shuf_order(params.clm_steps, params):
                 trainer.clm_step(lang1, lang2, params.lambda_clm)
@@ -287,7 +289,12 @@ def main(params):
             for lang1, lang2, lang3 in shuf_order(params.bt_steps):
                 trainer.bt_step(lang1, lang2, lang3, params.lambda_bt)
 
+            if trainer.n_total_iter < 3:
+               trainer.get_gpu_statistics()
+          
             trainer.iter()
+            if trainer.n_total_iter % 500 == 0:
+                evaluator.run_all_evals(trainer,valid_only=True)
 
         logger.info("============ End of epoch %i ============" % trainer.epoch)
 
@@ -307,7 +314,7 @@ def main(params):
 
 
 if __name__ == '__main__':
-
+    import warnings; warnings.simplefilter('ignore', category=UserWarning)
     # generate parser / parse parameters
     parser = get_parser()
     params = parser.parse_args()

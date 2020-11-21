@@ -10,7 +10,7 @@ import os
 import torch
 
 from .pretrain import load_embeddings
-from .transformer import DECODER_ONLY_PARAMS, TransformerModel  # , TRANSFORMER_LAYER_PARAMS
+from .transformer import DECODER_ONLY_PARAMS, TRANSFORMER_LAYER_PARAMS, TransformerModel  # , TRANSFORMER_LAYER_PARAMS
 from .memory import HashingMemory
 
 
@@ -120,6 +120,7 @@ def build_model(params, dico):
         if params.reload_model != '':
             logger.info("Reloading model from %s ..." % params.reload_model)
             reloaded = torch.load(params.reload_model, map_location=lambda storage, loc: storage.cuda(params.local_rank))['model']
+          #  print(torch.load(params.reload_model)['params'])
             if all([k.startswith('module.') for k in reloaded.keys()]):
                 reloaded = {k[len('module.'):]: v for k, v in reloaded.items()}
 
@@ -140,8 +141,9 @@ def build_model(params, dico):
 
     else:
         # build
-        encoder = TransformerModel(params, dico, is_encoder=True, with_output=True)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
-        decoder = TransformerModel(params, dico, is_encoder=False, with_output=True)
+        if params.reload_model == '':
+            encoder = TransformerModel(params, dico, is_encoder=True, with_output=True)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
+            decoder = TransformerModel(params, dico, is_encoder=False, with_output=True)
 
         # reload pretrained word embeddings
         if params.reload_emb != '':
@@ -158,24 +160,56 @@ def build_model(params, dico):
             if enc_path != '':
                 logger.info("Reloading encoder from %s ..." % enc_path)
                 enc_reload = torch.load(enc_path, map_location=lambda storage, loc: storage.cuda(params.local_rank))
+                n_layers_pretrained = enc_reload['params']['n_layers']
+                n_layers_thismodel = params.n_layers
+                enc_params = enc_reload['params']
                 enc_reload = enc_reload['model' if 'model' in enc_reload else 'encoder']
                 if all([k.startswith('module.') for k in enc_reload.keys()]):
                     enc_reload = {k[len('module.'):]: v for k, v in enc_reload.items()}
+                
+                for i in range(n_layers_pretrained):
+                    if i >= n_layers_thismodel:
+                        for k in TRANSFORMER_LAYER_PARAMS:
+                            k = k % i
+                            del enc_reload[k]
+                params.n_langs = enc_params['n_langs']
+                params.id2lang = enc_params['id2lang']
+                params.lang2id = enc_params['lang2id']
+                encoder = TransformerModel(params, dico, is_encoder=True, with_output=True)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
                 encoder.load_state_dict(enc_reload)
-
+            else: 
+                encoder = TransformerModel(params, dico, is_encoder=True, with_output=True)  # TODO: only output when necessary - len(params.clm_steps + params.mlm_steps) > 0
             # reload decoder
             if dec_path != '':
                 logger.info("Reloading decoder from %s ..." % dec_path)
                 dec_reload = torch.load(dec_path, map_location=lambda storage, loc: storage.cuda(params.local_rank))
+                n_layers_pretrained = dec_reload['params']['n_layers']
+                n_layers_thismodel = params.n_layers
+                dec_params = dec_reload['params']
                 dec_reload = dec_reload['model' if 'model' in dec_reload else 'decoder']
                 if all([k.startswith('module.') for k in dec_reload.keys()]):
                     dec_reload = {k[len('module.'):]: v for k, v in dec_reload.items()}
+                
+                for i in range(n_layers_pretrained):
+                    if i >= n_layers_thismodel:
+                        for k in TRANSFORMER_LAYER_PARAMS:
+                            k = k % i
+                            del dec_reload[k]
+
+                params.n_langs = dec_params['n_langs']
+                params.id2lang = dec_params['id2lang']
+                params.lang2id = dec_params['lang2id']
+
+                decoder = TransformerModel(params, dico, is_encoder=False, with_output=True)
                 for i in range(params.n_layers):
                     for name in DECODER_ONLY_PARAMS:
                         if name % i not in dec_reload:
                             logger.warning("Parameter %s not found." % (name % i))
                             dec_reload[name % i] = decoder.state_dict()[name % i]
+
                 decoder.load_state_dict(dec_reload)
+            else:
+                decoder = TransformerModel(params, dico, is_encoder=False, with_output=True)
 
         logger.debug("Encoder: {}".format(encoder))
         logger.debug("Decoder: {}".format(decoder))

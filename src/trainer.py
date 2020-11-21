@@ -11,7 +11,9 @@ import time
 from logging import getLogger
 from collections import OrderedDict
 import numpy as np
+from datetime import datetime
 import torch
+import torch.cuda as cuda
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import clip_grad_norm_
@@ -22,6 +24,8 @@ from .utils import to_cuda, concat_batches, find_modules
 from .utils import parse_lambda_config, update_lambdas
 from .model.memory import HashingMemory
 from .model.transformer import TransformerFFN
+
+from torch.utils.tensorboard import SummaryWriter
 
 
 logger = getLogger()
@@ -60,7 +64,7 @@ class Trainer(object):
         if params.multi_gpu and params.amp == -1:
             logger.info("Using nn.parallel.DistributedDataParallel ...")
             for name in self.MODEL_NAMES:
-                setattr(self, name, nn.parallel.DistributedDataParallel(getattr(self, name), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True))
+                setattr(self, name, nn.parallel.DistributedDataParallel(getattr(self, name), device_ids=[params.local_rank], output_device=params.local_rank, broadcast_buffers=True, find_unused_parameters=True))
 
         # set optimizers
         self.set_optimizers()
@@ -124,12 +128,29 @@ class Trainer(object):
             [('BT-%s-%s-%s' % (l1, l2, l3), []) for l1, l2, l3 in params.bt_steps]
         )
         self.last_time = time.time()
+        
+        # TensorBoard writer
+        if self.params.is_master:
+            self.writer = SummaryWriter(log_dir='runs/' + params.exp_name + '_' + params.exp_id + '_' + datetime.now().strftime("%b%d_%H-%M-%S"))
 
+        
         # reload potential checkpoints
         self.reload_checkpoint()
 
         # initialize lambda coefficients and their configurations
         parse_lambda_config(params)
+
+    def __del__(self):
+        if self.params.is_master: 
+            self.writer.close()
+        
+    def get_gpu_statistics(self):
+        id = cuda.current_device()
+        print("Max memory allocated on GPU %d: %d bytes" % (id, cuda.max_memory_allocated(id)))
+        print("Max memory cached on GPU %d: %d bytes" % (id, cuda.max_memory_cached(id)))
+        print("Current memory allocated on GPU %d: %d bytes" % (id, cuda.memory_allocated(id)))
+        print("Current memory cached on GPU %d: %d bytes" % (id, cuda.memory_cached(id)))
+
 
     def set_parameters(self):
         """
@@ -224,7 +245,16 @@ class Trainer(object):
         else:
             if self.n_iter % params.accumulate_gradients == 0:
                 with apex.amp.scale_loss(loss, optimizers) as scaled_loss:
-                    scaled_loss.backward()
+                    try:
+                        scaled_loss.backward()
+                    except RuntimeError as e:
+                        if 'out of memory' in str(e):
+                            print('| WARNING: ran out of memory, retrying batch')
+                            torch.cuda.empty_cache()
+                            #scaled_loss.backward()
+                        else:
+                            raise e
+
                 if params.clip_grad_norm > 0:
                     for name in names:
                         # norm_check_a = (sum([p.grad.norm(p=2).item() ** 2 for p in apex.amp.master_params(self.optimizers[name])])) ** 0.5
@@ -236,7 +266,15 @@ class Trainer(object):
                     optimizer.zero_grad()
             else:
                 with apex.amp.scale_loss(loss, optimizers, delay_unscale=True) as scaled_loss:
-                    scaled_loss.backward()
+                    try:
+                        scaled_loss.backward()
+                    except RuntimeError as e:
+                        if 'out of memory' in str(e):
+                            print('| WARNING: ran out of memory, retrying batch')
+                            torch.cuda.empty_cache()
+                            #scaled_loss.backward()
+                        else:
+                            raise e
 
     def iter(self):
         """
@@ -246,6 +284,7 @@ class Trainer(object):
         self.n_total_iter += 1
         update_lambdas(self.params, self.n_total_iter)
         self.print_stats()
+
 
     def print_stats(self):
         """
@@ -299,7 +338,10 @@ class Trainer(object):
                 )
         else:
             assert stream is False
-            _lang1, _lang2 = (lang1, lang2) if lang1 < lang2 else (lang2, lang1)
+            if (lang1, lang2) in self.data['para']: ###xxx ivana
+                _lang1, _lang2 = (lang1, lang2)
+            else:
+                _lang1, _lang2 = (lang1, lang2) if lang1 < lang2 else (lang2, lang1)
             iterator = self.data['para'][(_lang1, _lang2)]['train'].get_iterator(
                 shuffle=True,
                 group_by_size=self.params.group_by_size,
@@ -324,7 +366,7 @@ class Trainer(object):
         except StopIteration:
             iterator = self.get_iterator(iter_name, lang1, lang2, stream)
             x = next(iterator)
-        return x if lang2 is None or lang1 < lang2 else x[::-1]
+        return x if lang2 is None or (lang1, lang2) in self.data['para'] else x[::-1] ### xxx ivana
 
     def word_shuffle(self, x, l):
         """
@@ -442,7 +484,9 @@ class Trainer(object):
         # do not predict padding
         pred_mask[x == params.pad_index] = 0
         pred_mask[0] = 0  # TODO: remove
-
+        #iif pred_mask.sum() == 0:
+        #    print("Fixing orediction mask")
+        #    pred_mask[0,0] = 1 #ivana check
         # mask a number of words == 0 [8] (faster with fp16)
         if params.fp16:
             pred_mask = pred_mask.view(-1)
@@ -451,7 +495,7 @@ class Trainer(object):
             if n2 != n1:
                 pred_mask[torch.nonzero(pred_mask).view(-1)[:n1 - n2]] = 0
             pred_mask = pred_mask.view(slen, bs)
-            assert pred_mask.sum().item() % 8 == 0
+            #assert pred_mask.sum().item() % 8 == 0, pred_mask.sum().item()
 
         # generate possible targets / update x input
         _x_real = x[pred_mask]
@@ -539,6 +583,8 @@ class Trainer(object):
 
         # reload model parameters
         for name in self.MODEL_NAMES:
+            if all([k.startswith('module.') for k in data[name].keys()]) and not all([k.startswith('module.') for k in getattr(self, name).state_dict().keys()]) :
+                data[name] = {k[len('module.'):]: v for k, v in data[name].items()}
             getattr(self, name).load_state_dict(data[name])
 
         # reload optimizers
@@ -559,7 +605,8 @@ class Trainer(object):
         # reload main metrics
         self.epoch = data['epoch'] + 1
         self.n_total_iter = data['n_total_iter']
-        self.best_metrics = data['best_metrics']
+        for m in data['best_metrics']:
+            self.best_metrics[m] = data['best_metrics'][m]
         self.best_stopping_criterion = data['best_stopping_criterion']
         logger.warning(f"Checkpoint reloaded. Resuming at epoch {self.epoch} / iteration {self.n_total_iter} ...")
 
@@ -592,6 +639,7 @@ class Trainer(object):
         """
         End the epoch.
         """
+        self.save_checkpoint('checkpoint', include_optimizers=True)
         # stop if the stopping criterion has not improved after a certain number of epochs
         if self.stopping_criterion is not None and (self.params.is_master or not self.stopping_criterion[0].endswith('_mt_bleu')):
             metric, biggest = self.stopping_criterion
@@ -611,7 +659,6 @@ class Trainer(object):
                 if self.params.multi_gpu and 'SLURM_JOB_ID' in os.environ:
                     os.system('scancel ' + os.environ['SLURM_JOB_ID'])
                 exit()
-        self.save_checkpoint('checkpoint', include_optimizers=True)
         self.epoch += 1
 
     def round_batch(self, x, lengths, positions, langs):
@@ -719,6 +766,11 @@ class Trainer(object):
         tensor = model('fwd', x=x, lengths=lengths, positions=positions, langs=langs, causal=False)
         _, loss = model('predict', tensor=tensor, pred_mask=pred_mask, y=y, get_scores=False)
         self.stats[('MLM-%s' % lang1) if lang2 is None else ('MLM-%s-%s' % (lang1, lang2))].append(loss.item())
+        if self.params.is_master:
+            if lang2 is None:
+                self.writer.add_scalar(('Loss/MLM-%s' % lang1), loss.item(), self.n_total_iter)
+            else:
+                self.writer.add_scalar(('Loss/MLM-%s-%s' % (lang1, lang2)), loss.item(), self.n_total_iter)
         loss = lambda_coeff * loss
 
         # optimize
@@ -857,6 +909,11 @@ class EncDecTrainer(Trainer):
         # loss
         _, loss = self.decoder('predict', tensor=dec2, pred_mask=pred_mask, y=y, get_scores=False)
         self.stats[('AE-%s' % lang1) if lang1 == lang2 else ('MT-%s-%s' % (lang1, lang2))].append(loss.item())
+        if self.params.is_master:
+            if lang1 == lang2:
+                self.writer.add_scalar(('Loss/AE-%s' % lang1), loss.item(), self.n_total_iter)
+            else:
+                self.writer.add_scalar(('Loss/MT-%s-%s' % (lang1,lang2)), loss.item(), self.n_total_iter)
         loss = lambda_coeff * loss
 
         # optimize
@@ -889,7 +946,7 @@ class EncDecTrainer(Trainer):
         # cuda
         x1, len1, langs1 = to_cuda(x1, len1, langs1)
 
-        # generate a translation
+                # generate a translation
         with torch.no_grad():
 
             # evaluation mode
@@ -924,11 +981,12 @@ class EncDecTrainer(Trainer):
         # loss
         _, loss = self.decoder('predict', tensor=dec3, pred_mask=pred_mask, y=y1, get_scores=False)
         self.stats[('BT-%s-%s-%s' % (lang1, lang2, lang3))].append(loss.item())
-        loss = lambda_coeff * loss
+        #import pdb; pdb.set_trace()
+        if self.params.is_master:
+            self.writer.add_scalar(('Loss/BT-%s-%s-%s' % (lang1, lang2, lang3)), loss.item(), self.n_total_iter)
 
         # optimize
         self.optimize(loss)
-
         # number of processed sentences / words
         self.n_sentences += params.batch_size
         self.stats['processed_s'] += len1.size(0)

@@ -115,6 +115,7 @@ def get_dump_path(params):
 
     # create the dump folder / update parameters
     params.dump_path = os.path.join(sweep_path, params.exp_id)
+    assert not os.path.isdir(params.dump_path + '/hypotheses'), params.dump_path # check that we are not rewriting an existing folder
     if not os.path.isdir(params.dump_path):
         subprocess.Popen("mkdir -p %s" % params.dump_path, shell=True).wait()
 

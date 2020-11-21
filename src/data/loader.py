@@ -177,6 +177,7 @@ def load_para_data(params, data):
         assert (src, tgt) not in data['para']
         data['para'][(src, tgt)] = {}
 
+
         for splt in ['train', 'valid', 'test']:
 
             # no need to load training data for evaluation
@@ -185,6 +186,10 @@ def load_para_data(params, data):
 
             # for back-translation, we can't load training data
             if splt == 'train' and (src, tgt) not in required_para_train and (tgt, src) not in required_para_train:
+                continue
+
+            # xxx ivana: for asymetrical synth datasets (only training)
+            if src > tgt and splt != 'train':
                 continue
 
             # load binarized datasets
@@ -308,6 +313,10 @@ def check_data_params(params):
         } for src in params.langs for tgt in params.langs
         if src < tgt and ((src, tgt) in required_para or (tgt, src) in required_para)
     }
+    for (src, tgt) in required_para: ### xxx ivana: in case of asymmetrical synthetic training datasets 
+        if tgt is not None and src > tgt:
+            params.para_dataset[(src, tgt)] = {'train': (os.path.join(params.data_path, '%s.%s-%s.%s.pth' % ('train', src, tgt, src)),
+                                                         os.path.join(params.data_path, '%s.%s-%s.%s.pth' % ('train', src, tgt, tgt)))}
     for paths in params.para_dataset.values():
         for p1, p2 in paths.values():
             if not os.path.isfile(p1):

@@ -22,7 +22,7 @@ import argparse
 import torch
 
 from src.utils import AttrDict
-from src.utils import bool_flag, initialize_exp
+from src.utils import bool_flag, initialize_exp, restore_segmentation
 from src.data.dictionary import Dictionary
 from src.model.transformer import TransformerModel
 
@@ -46,6 +46,7 @@ def get_parser():
 
     # parser.add_argument("--max_vocab", type=int, default=-1, help="Maximum vocabulary size (-1 to disable)")
     # parser.add_argument("--min_count", type=int, default=0, help="Minimum vocabulary count")
+    parser.add_argument("--max_length", type=int, default=200, help="Max number of tokens per sentence")
 
     # source language / target language
     parser.add_argument("--src_lang", type=str, default="", help="Source language")
@@ -72,10 +73,15 @@ def main(params):
 
     # build dictionary / build encoder / build decoder / reload weights
     dico = Dictionary(reloaded['dico_id2word'], reloaded['dico_word2id'], reloaded['dico_counts'])
+    enc_reload = reloaded['encoder']
+    dec_reload = reloaded['decoder']
+    if all([k.startswith('module.') for k in enc_reload.keys()]):
+        enc_reload = {k[len('module.'):]: v for k, v in enc_reload.items()}
+        dec_reload = {k[len('module.'):]: v for k, v in dec_reload.items()}
     encoder = TransformerModel(model_params, dico, is_encoder=True, with_output=True).cuda().eval()
     decoder = TransformerModel(model_params, dico, is_encoder=False, with_output=True).cuda().eval()
-    encoder.load_state_dict(reloaded['encoder'])
-    decoder.load_state_dict(reloaded['decoder'])
+    encoder.load_state_dict(enc_reload)
+    decoder.load_state_dict(dec_reload)
     params.src_id = model_params.lang2id[params.src_lang]
     params.tgt_id = model_params.lang2id[params.tgt_lang]
 
@@ -94,10 +100,14 @@ def main(params):
         word_ids = [torch.LongTensor([dico.index(w) for w in s.strip().split()])
                     for s in src_sent[i:i + params.batch_size]]
         lengths = torch.LongTensor([len(s) + 2 for s in word_ids])
-        batch = torch.LongTensor(lengths.max().item(), lengths.size(0)).fill_(params.pad_index)
+        max_len = min(params.max_length, lengths.max().item())
+        batch = torch.LongTensor(max_len, lengths.size(0)).fill_(params.pad_index)
         batch[0] = params.eos_index
         for j, s in enumerate(word_ids):
             if lengths[j] > 2:  # if sentence not empty
+                if lengths[j] > max_len:
+                   lengths[j] = max_len
+                   s = s[:max_len - 2]
                 batch[1:lengths[j] - 1, j].copy_(s)
             batch[lengths[j] - 1, j] = params.eos_index
         langs = batch.clone().fill_(params.src_id)
@@ -123,6 +133,7 @@ def main(params):
             f.write(target + "\n")
 
     f.close()
+    restore_segmentation(params.output_path)
 
 
 if __name__ == '__main__':

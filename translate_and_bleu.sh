@@ -21,8 +21,12 @@ key="$1"
 case $key in
   --model)
     MODEL="$2"; shift 2;;
+  --model2)
+    MODEL2="--model_path2 $2"; shift 2;;
   --bpe)
     BPE_CODES="$2"; shift 2;;
+  --name)
+    NAME="$2"; shift 2;;
   --vocab)
     VOCAB="$2"; shift 2;;
   --input)
@@ -67,8 +71,8 @@ fi
 TEST_SET_BASE=`basename $TEST_SET | sed 's/.sgm//'`
 TEST_SET_TOK=$PWD/$TEST_SET_BASE.tok
 TEST_SET_BPE=$PWD/$TEST_SET_BASE.bpe
-TEST_SET_OUT_TOK=`dirname $MODEL`/$TEST_SET_BASE.translated.$TGT.tok
-TEST_SET_OUT=`dirname $MODEL`/$TEST_SET_BASE.translated.$TGT
+TEST_SET_OUT_TOK=`dirname $MODEL`/$TEST_SET_BASE.translated.$NAME.$TGT.tok
+TEST_SET_OUT=`dirname $MODEL`/$TEST_SET_BASE.translated.$NAME.$TGT
 BLEU=$TEST_SET_OUT.bleu
 
 REF_BASE=`basename $REF`
@@ -123,8 +127,8 @@ fi
 #echo "Applying BPE to valid and test files..."
 $FASTBPE applybpe $TEST_SET_BPE  $TEST_SET_TOK  $BPE_CODES $SRC_VOCAB
 
-echo "cat $TEST_SET_BPE | ./translate.sh --model_path $MODEL --output_path $TEST_SET_OUT_TOK --src_lang $SRC --tgt_lang $TGT"
-cat $TEST_SET_BPE | python ./translate.py --exp_name translate --model_path $MODEL --output_path $TEST_SET_OUT_TOK --src_lang $SRC --tgt_lang $TGT  --beam_size $BEAM_SIZE > /dev/null
+echo python ./translate.py --exp_name translate --model_path $MODEL $MODEL2 --output_path $TEST_SET_OUT_TOK --input_path $TEST_SET_BPE --src_lang $SRC --tgt_lang $TGT  --beam_size $BEAM_SIZE                                                       132 sed -r 's/(@@ )|(@@ ?$)//g' $TEST_SET_OUT_TOK
+python ./translate.py --exp_name translate --model_path $MODEL $MODEL2 --output_path $TEST_SET_OUT_TOK --input_path $TEST_SET_BPE --src_lang $SRC --tgt_lang $TGT  --beam_size $BEAM_SIZE 
 sed -r 's/(@@ )|(@@ ?$)//g' $TEST_SET_OUT_TOK
 
 $DETOKENIZER -l $TGT <  $TEST_SET_OUT_TOK > $TEST_SET_OUT
@@ -140,4 +144,4 @@ $MULTIBLEU $REF_TOK < $TEST_SET_OUT_TOK |& tee $BLEU
 #$MTEVAL $REF < $TEST_SET_OUT
 fi 
 
-rm $TEST_SET_OUT_TOK $TEST_SET_TOK  
+rm $TEST_SET_OUT_TOK $TEST_SET_TOK $TEST_SET_BPE 

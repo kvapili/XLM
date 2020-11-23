@@ -42,7 +42,9 @@ def get_parser():
 
     # model / output paths
     parser.add_argument("--model_path", type=str, default="", help="Model path")
+    parser.add_argument("--model_path2", type=str, default="", help="Second model path (for ensembling)")
     parser.add_argument("--output_path", type=str, default="", help="Output path")
+    parser.add_argument("--input_path", type=str, default="", help="Output path")
 
     # parser.add_argument("--max_vocab", type=int, default=-1, help="Maximum vocabulary size (-1 to disable)")
     # parser.add_argument("--min_count", type=int, default=0, help="Minimum vocabulary count")
@@ -68,6 +70,7 @@ def main(params):
     # generate parser / parse parameters
     parser = get_parser()
     params = parser.parse_args()
+    
     reloaded = torch.load(params.model_path)
     model_params = AttrDict(reloaded['params'])
     logger.info("Supported languages: %s" % ", ".join(model_params.lang2id.keys()))
@@ -87,14 +90,42 @@ def main(params):
     decoder = TransformerModel(model_params, dico, is_encoder=False, with_output=True).cuda().eval()
     encoder.load_state_dict(enc_reload)
     decoder.load_state_dict(dec_reload)
+
+    if params.model_path2 != "":
+        assert params.beam_size > 1, "Model ensembling only implemented for beam search"
+        logger.info("Model ensambling of % and %s" % (params.model_path, params.model_path2))
+        reloaded2 = torch.load(params.model_path2)
+        model_params2 = AttrDict(reloaded2['params'])
+        for name in ['n_words', 'bos_index', 'eos_index', 'pad_index', 'unk_index', 'mask_index', 'lang2id']:
+            assert getattr(model_params, name) == getattr(model_params2, name), name
+        for name in ['dico_id2word', 'dico_word2id', 'dico_counts']:
+            assert reloaded[name] == reloaded2[name], name
+        enc_reload2 = reloaded2['encoder']
+        dec_reload2 = reloaded2['decoder']
+        if all([k.startswith('module.') for k in enc_reload2.keys()]):
+            enc_reload2 = {k[len('module.'):]: v for k, v in enc_reload2.items()}
+            dec_reload2 = {k[len('module.'):]: v for k, v in dec_reload2.items()}
+        encoder2 = TransformerModel(model_params2, dico, is_encoder=True, with_output=True).cuda().eval()
+        decoder2 = TransformerModel(model_params2, dico, is_encoder=False, with_output=True).cuda().eval()
+        encoder2.load_state_dict(enc_reload2)
+        decoder2.load_state_dict(dec_reload2)
+                        
     params.src_id = model_params.lang2id[params.src_lang]
     params.tgt_id = model_params.lang2id[params.tgt_lang]
 
     # read sentences from stdin
     src_sent = []
-    for line in sys.stdin.readlines():
-        assert len(line.strip().split()) > 0
-        src_sent.append(line)
+    if params.input_path == "":
+        for line in sys.stdin.readlines():
+            assert len(line.strip().split()) > 0
+            src_sent.append(line)
+    else:
+        assert os.path.isfile(params.input_path)
+        with open(params.input_path, "r") as fp:
+            for line in fp.readlines():
+                assert len(line.strip().split()) > 0
+                src_sent.append(line)        
+
     logger.info("Read %i sentences from stdin. Translating ..." % len(src_sent))
 
     f = io.open(params.output_path, 'w', encoding='utf-8')
@@ -120,12 +151,18 @@ def main(params):
         # encode source batch and translate it
         encoded = encoder('fwd', x=batch.cuda(), lengths=lengths.cuda(), langs=langs.cuda(), causal=False)
         encoded = encoded.transpose(0, 1)
+        if params.model_path2 != "":
+            encoded2 = encoder2('fwd', x=batch.cuda(), lengths=lengths.cuda(), langs=langs.cuda(), causal=False)
+            encoded2 = encoded2.transpose(0, 1)
         if params.beam_size == 1:
             decoded, dec_lengths = decoder.generate(encoded, lengths.cuda(), params.tgt_id, max_len=int(1.5 * lengths.max().item() + 10))
         else:
-            decoded, dec_lengths = decoder.generate_beam(encoded, lengths.cuda(), params.tgt_id, beam_size=params.beam_size, 
+            if params.model_path2 == "":
+                decoded, dec_lengths = decoder.generate_beam(encoded, lengths.cuda(), params.tgt_id, beam_size=params.beam_size, 
                                          length_penalty=params.length_penalty, early_stopping=params.early_stopping,max_len=int(1.5 * lengths.max().item() + 10))
-
+            else:
+                decoded, dec_lengths = decoder.generate_ensemble_beam([encoded, encoded2], lengths.cuda(), params.tgt_id, ensemble=[decoder2], beam_size=params.beam_size, 
+                                         length_penalty=params.length_penalty, early_stopping=params.early_stopping,max_len=int(1.5 * lengths.max().item() + 10))
         # convert sentences to words
         for j in range(decoded.size(1)):
 
@@ -154,7 +191,7 @@ if __name__ == '__main__':
     # check parameters
     assert os.path.isfile(params.model_path)
     assert params.src_lang != '' and params.tgt_lang != '' and params.src_lang != params.tgt_lang
-    assert params.output_path and not os.path.isfile(params.output_path)
+    assert params.output_path and not os.path.isfile(params.output_path), params.output_path
 
     # translate
     with torch.no_grad():

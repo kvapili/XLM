@@ -51,7 +51,12 @@ def get_parser():
     # source language / target language
     parser.add_argument("--src_lang", type=str, default="", help="Source language")
     parser.add_argument("--tgt_lang", type=str, default="", help="Target language")
-
+    
+    parser.add_argument("--beam_size", type=int, default=1, help="Beam size (default 1 - greedy)")
+    parser.add_argument("--length_penalty", type=float, default=1,
+                                    help="Length penalty, values < 1.0 favor shorter sentences, while values > 1.0 favor longer ones.")
+    parser.add_argument("--early_stopping", type=bool_flag, default=False,
+                                        help="Early stopping, stop as soon as we have `beam_size` hypotheses, although longer ones may have better scores.")
     return parser
 
 
@@ -115,7 +120,11 @@ def main(params):
         # encode source batch and translate it
         encoded = encoder('fwd', x=batch.cuda(), lengths=lengths.cuda(), langs=langs.cuda(), causal=False)
         encoded = encoded.transpose(0, 1)
-        decoded, dec_lengths = decoder.generate(encoded, lengths.cuda(), params.tgt_id, max_len=int(1.5 * lengths.max().item() + 10))
+        if params.beam_size == 1:
+            decoded, dec_lengths = decoder.generate(encoded, lengths.cuda(), params.tgt_id, max_len=int(1.5 * lengths.max().item() + 10))
+        else:
+            decoded, dec_lengths = decoder.generate_beam(encoded, lengths.cuda(), params.tgt_id, beam_size=params.beam_size, 
+                                         length_penalty=params.length_penalty, early_stopping=params.early_stopping,max_len=int(1.5 * lengths.max().item() + 10))
 
         # convert sentences to words
         for j in range(decoded.size(1)):

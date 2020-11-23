@@ -9,7 +9,7 @@ import os
 import math
 import time
 from logging import getLogger
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import numpy as np
 from datetime import datetime
 import torch
@@ -24,6 +24,7 @@ from .utils import to_cuda, concat_batches, find_modules
 from .utils import parse_lambda_config, update_lambdas
 from .model.memory import HashingMemory
 from .model.transformer import TransformerFFN
+from .bpe import load_subword_nmt_table, BpeOnlineTokenizer
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -100,6 +101,14 @@ class Trainer(object):
         params.mask_scores = np.maximum(counts, 1) ** -params.sample_alpha
         params.mask_scores[params.pad_index] = 0  # do not predict <PAD> index
         params.mask_scores[counts == 0] = 0       # do not predict special tokens
+
+        # BPE dropout
+        if params.bpe_dropout > 0:
+            self.word2id = defaultdict(lambda: self.data["dico"].unk_index, self.data["dico"].word2id)
+            self.id2word = self.data["dico"].id2word
+            merge_table = load_subword_nmt_table(self.params.merge_table)
+            self.bpe_tokenizer = BpeOnlineTokenizer(self.params.bpe_dropout, merge_table) 
+
 
         # validation metrics
         self.metrics = []
@@ -461,6 +470,31 @@ class Trainer(object):
         words, lengths = self.word_dropout(words, lengths)
         words, lengths = self.word_blank(words, lengths)
         return words, lengths
+
+    def bpe_dropout(self, x, l):
+        """
+        Apply BPE dropout to batch
+        """
+        max_len = x.size(0) - 2
+        eos = self.params.eos_index
+        unk = self.data["dico"].unk_index
+
+        sentences = []
+        for i in range(l.size(0)): 
+            assert x[l[i] - 1, i] == eos
+            ids = x[1:l[i] - 1, i].tolist()
+            words = [self.id2word[w] for w in ids]
+            s = " ".join(words).replace("@@ ","")
+            assert "@@" not in s
+            new_words = self.bpe_tokenizer(s, sentinels=['', '</w>'], regime='end', bpe_symbol='@@', always_merge_sentinels=True).split(" ")
+            new_ids = [eos] + [self.word2id[w] for w in new_words] + [eos]
+            l[i] = len(new_ids)
+            sentences.append(new_ids)
+        x2 = torch.LongTensor(l.max(), l.size(0)).fill_(self.params.pad_index)
+        for i in range(l.size(0)):
+            x2[:l[i], i].copy_(torch.LongTensor(sentences[i]))
+        return x2, l
+
 
     def mask_out(self, x, lengths):
         """
@@ -887,6 +921,9 @@ class EncDecTrainer(Trainer):
             (x1, len1) = self.add_noise(x1, len1)
         else:
             (x1, len1), (x2, len2) = self.get_batch('mt', lang1, lang2)
+            if params.bpe_dropout > 0:
+                (x1, len1) = self.bpe_dropout(x1, len1)
+                (x2, len2) = self.bpe_dropout(x2, len2)
         langs1 = x1.clone().fill_(lang1_id)
         langs2 = x2.clone().fill_(lang2_id)
 

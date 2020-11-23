@@ -104,6 +104,8 @@ def get_parser():
                         help="Randomly dropout input words (0 to disable)")
     parser.add_argument("--word_blank", type=float, default=0,
                         help="Randomly blank input words (0 to disable)")
+    parser.add_argument("--bpe_dropout", type=float, default=0,
+                        help="Apply BPE dropout (0 to disable)")
 
     # data
     parser.add_argument("--data_path", type=str, default="",

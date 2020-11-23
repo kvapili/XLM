@@ -43,6 +43,12 @@ def check_model_params(params):
         assert 0 <= params.word_dropout < 1
         assert 0 <= params.word_blank < 1
 
+    # BPE dropout for MT
+    if params.bpe_dropout > 0:
+        assert params.bpe_dropout < 1
+        params.merge_table = params.data_path + "/codes"
+        assert os.path.isfile(params.merge_table), params.merge_table
+
     # model dimensions
     assert params.emb_dim % params.n_heads == 0
 
